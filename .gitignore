@@ -1,0 +1,16 @@
+node_modules
+build
+.env
+memory.json
+
+weather/node_modules
+weather/build
+weather/.env
+weather/memory.json
+
+mcp_config.json
+
+mcp-client-typescript/node_modules
+mcp-client-typescript/build
+mcp-client-typescript/.env
+mcp-client-typescript/memory.json
