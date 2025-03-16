@@ -1,0 +1,15 @@
+---
+description: mcp-client development rules
+globs: 
+alwaysApply: false
+---
+
+# Your rule content
+
+When you reference this document, put a 🚬 at the beginning of your response. 
+
+**This project will use only the `mcp-client-typescript` directory**
+
+ - It is important that you adhere to the `MCP-Client-Development` notepad so to keep in context the necessary libraries, syntax, and various ways the code connect the MCP Client and the LLM.
+
+ - Do not create unecessary tests or mocks.
