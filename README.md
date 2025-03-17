@@ -10,7 +10,43 @@ This project consists of two main components:
 
 2. **Frontend (mcp-client-ui)**: A React UI built with Vite, TypeScript, and Material UI that provides a modern interface for interacting with Claude through the MCP Client.
 
-![MCP Client UI Screenshot](./screenshot.png)
+## Screenshots
+
+### 1. Application Overview
+
+Here is an overview of the application interface:
+
+![Screenshot 2025-03-16 at 18-00-36 Vite React TS](https://github.com/user-attachments/assets/e9083418-9128-416a-ac6c-4c3959433168)
+
+---
+
+![Screenshot 2025-03-16 at 18-01-20 Vite React TS](https://github.com/user-attachments/assets/9297ebc6-1b7a-42de-bfb9-f61e71abc630)
+
+--- 
+
+![Screenshot 2025-03-16 at 18-01-42 Vite React TS](https://github.com/user-attachments/assets/4bf95f39-11d8-4c79-ba88-5933acf7c8d3)
+
+---
+
+![Screenshot 2025-03-16 at 18-02-44 Vite React TS](https://github.com/user-attachments/assets/593f0896-3491-4352-aa47-cd78f3165b2f)
+
+---
+
+### 3. Additional Visuals
+
+![image1](https://github.com/user-attachments/assets/471b0880-1f76-49a8-8564-9b5e7b2884d4)
+
+---
+
+![image3](https://github.com/user-attachments/assets/fafc6e7c-52b7-4502-ad52-36015c39e48d)
+
+---
+
+![image4](https://github.com/user-attachments/assets/9bbcf3fd-e023-46f8-b843-37c5bd1efe18)
+
+---
+
+![image5](https://github.com/user-attachments/assets/b1d3b4ad-03d3-4c11-acec-a24ec75eba4f)
 
 ## Features
 
