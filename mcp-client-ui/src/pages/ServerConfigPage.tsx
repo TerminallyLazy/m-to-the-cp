@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Box, 
   Typography, 
@@ -27,14 +27,12 @@ const ServerConfigPage: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
   const [toggleLoading, setToggleLoading] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchServers();
-  }, []);
-
-  const fetchServers = async () => {
+  // Memoize fetchServers to avoid recreating it on each render
+  const fetchServers = useCallback(async () => {
     try {
       setLoading(true);
       const data = await mcpService.getServers();
+      console.log('Fetched server list:', data);
       setServers(data);
       setError(null);
     } catch (err) {
@@ -43,7 +41,23 @@ const ServerConfigPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchServers();
+    
+    // Register for server updates with mcpService
+    const unregister = mcpService.registerServerUpdateCallback(() => {
+      console.log('Server update detected in ServerConfigPage, refreshing data');
+      fetchServers();
+    });
+    
+    // Clean up the subscription when component unmounts
+    return () => {
+      unregister();
+    };
+  }, [fetchServers]);
 
   const handleConnect = async () => {
     if (!serverPath.trim()) {
@@ -56,13 +70,13 @@ const ServerConfigPage: React.FC = () => {
       setError(null);
       setSuccess(null);
       
+      console.log(`Attempting to connect to server: ${serverPath}`);
       const result = await mcpService.connectToServer(serverPath);
       
       if (result) {
         setSuccess(`Successfully connected to server: ${serverPath}`);
         setServerPath('');
-        // Refresh server list
-        await fetchServers();
+        // Server list will be updated by polling mechanism
       } else {
         setError('Failed to connect to server');
       }
@@ -107,12 +121,9 @@ const ServerConfigPage: React.FC = () => {
         }
       }
       
-      // Refresh server list
-      console.log(`Refreshing server list after toggling ${server.id}`);
-      await fetchServers();
-      console.log('Server list refreshed');
+      // Server list will be updated by polling mechanism
     } catch (err) {
-      console.error(`Error toggling server ${server.id} connection:`, err);
+      console.error('Error toggling server connection:', err);
       setError('An error occurred when toggling server connection');
     } finally {
       setToggleLoading(null);

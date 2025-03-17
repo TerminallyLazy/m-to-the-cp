@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Box, 
   Typography, 
@@ -13,7 +13,8 @@ import {
   Paper,
   Chip,
   Button,
-  CircularProgress
+  CircularProgress,
+  Alert
 } from '@mui/material';
 import { 
   Build as BuildIcon, 
@@ -28,11 +29,8 @@ const ToolsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const fetchData = async () => {
+  // Memoize fetchData to avoid recreating it on each render
+  const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -44,13 +42,31 @@ const ToolsPage: React.FC = () => {
       // Then get all available tools
       const toolsList = mcpService.getAllTools();
       setTools(toolsList);
+      
+      console.log('Updated tools list:', toolsList);
     } catch (err) {
       console.error('Error fetching tools data:', err);
       setError('Failed to fetch tools. Please check that the backend is running.');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchData();
+    
+    // Register for server updates with mcpService
+    const unregister = mcpService.registerServerUpdateCallback(() => {
+      console.log('Server update detected in ToolsPage, refreshing data');
+      fetchData();
+    });
+    
+    // Clean up the subscription when component unmounts
+    return () => {
+      unregister();
+    };
+  }, [fetchData]);
 
   // Group tools by server
   const toolsByServer = servers.reduce<Record<string, McpTool[]>>((acc, server) => {
@@ -96,6 +112,12 @@ const ToolsPage: React.FC = () => {
               <Typography variant="h6" sx={{ mb: 2 }}>
                 All Available Tools ({tools.length})
               </Typography>
+              
+              {tools.length === 0 ? (
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  No tools are currently available. Connect to an MCP server to see available tools.
+                </Alert>
+              ) : null}
               
               {tools.length === 0 ? (
                 <Paper variant="outlined" sx={{ p: 3, textAlign: 'center' }}>

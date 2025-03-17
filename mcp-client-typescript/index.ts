@@ -23,6 +23,18 @@ if (!apiKey && !isDevelopment) {
   throw new Error("ANTHROPIC_API_KEY is not set");
 }
 
+// Extended Message type that includes system role
+type ExtendedMessageParam = MessageParam | {
+  role: "system";
+  content: string;
+};
+
+/**
+ * Main MCP Client class
+ * 
+ * Note: For advanced multi-server connections, see connectionManager.ts
+ * For advanced multi-step agentic flows, see agentFlow.ts
+ */
 export class MCPClient {
   private mcp: Client;
   private anthropic: Anthropic;
@@ -34,6 +46,8 @@ export class MCPClient {
   private maxReconnectAttempts = 3;
   private reconnectDelay = 1000; // Base delay in ms
   private approvalCallback: ((toolName: string, args: any) => Promise<boolean>) | null = null;
+  private systemPrompt = "You are Claude, an AI assistant integrated with the Model Context Protocol (MCP). MCP is a standard protocol that allows you to access external tools, data sources, and capabilities provided by MCP servers. When a user asks you to perform tasks requiring external tools like accessing files, executing commands, or retrieving data, you should use the MCP tools provided to you. Never refer to MCP as 'Master Control Program' - it stands for 'Model Context Protocol'. Always use the most appropriate MCP tools available to solve the user's problems.";
+  private conversationHistory: ExtendedMessageParam[] = []; // Store conversation history
 
   constructor() {
     this.anthropic = new Anthropic({
@@ -48,31 +62,14 @@ export class MCPClient {
   }
 
   async connectToServer(serverScriptPath: string) {
-    try {
-      // Normalize server ID extraction to handle different path formats
-      let serverId: string;
-      let originalServerId: string;
-
-      // Check if it's an npm package (doesn't have path separators or file extensions)
-      if (!serverScriptPath.includes('/') && !serverScriptPath.includes('\\') && 
-          !serverScriptPath.endsWith('.js') && !serverScriptPath.endsWith('.py')) {
-        // For npm packages, keep the original ID for logging
-        originalServerId = serverScriptPath;
-        
-        // Extract the package name without scope as the ID
-        serverId = serverScriptPath.split('/').pop() || serverScriptPath;
-      } else {
-        // For file paths, keep the original path for logging
-        originalServerId = serverScriptPath;
-        
-        // Extract the basename without extension
-        serverId = path.basename(serverScriptPath).replace(/\.(js|py|ts)$/, '');
-      }
-      
-      // Normalize the ID consistently
-      const normalizedId = serverId.replace(/^(mcp-)?server-/, '');
-      
-      console.log(`Connecting to server: original=${originalServerId}, extracted=${serverId}, normalized=${normalizedId}`);
+    // Extract the server ID from the server script path
+    const serverId = this.extractServerId(serverScriptPath);
+    
+    // Create a normalized version of the ID for consistent lookup
+    const normalizedId = serverId.toLowerCase().replace(/^(mcp-)?server-/, '');
+    
+    try {      
+      console.log(`Connecting to server: original=${serverScriptPath}, extracted=${serverId}, normalized=${normalizedId}`);
       
       // Check if already connected using both original and normalized IDs
       if (this.connectedServers.get(normalizedId) || this.connectedServers.get(serverId)) {
@@ -83,12 +80,17 @@ export class MCPClient {
       // Reset reconnect attempts if this is a fresh connection
       this.reconnectAttempts.set(normalizedId, 0);
       
-      const isJs = serverScriptPath.endsWith(".js") || serverScriptPath.endsWith(".ts");
-      const isPy = serverScriptPath.endsWith(".py");
-      const isNpmPackage = !serverScriptPath.includes('.') && (
-        serverScriptPath.startsWith('@') || 
-        !serverScriptPath.includes('/')
-      );
+      // Better detection for npm packages with versions
+      const hasVersionSuffix = /.*@\d+(\.\d+)*$/.test(serverScriptPath) && !serverScriptPath.startsWith('@');
+      
+      // Determine the type of server based on path
+      const isJs = serverScriptPath.endsWith('.js');
+      const isPy = serverScriptPath.endsWith('.py');
+      const isNpmPackage = serverScriptPath.startsWith('@') || 
+                          (!serverScriptPath.includes('/') && 
+                           !serverScriptPath.includes('\\') &&
+                           !isJs && !isPy) ||
+                          hasVersionSuffix;
       
       if (isNpmPackage) {
         // Handle NPM package as a server
@@ -104,19 +106,18 @@ export class MCPClient {
         });
       } else if (isPy) {
         // Handle Python file as a server
-        const pythonCommand = process.platform === "win32" ? "python" : "python3";
         this.transport = new StdioClientTransport({
-          command: pythonCommand,
+          command: process.platform === "win32" ? "python" : "python3",
           args: [serverScriptPath],
         });
       } else {
         throw new Error("Server script must be a .js or .py file, or an npm package name");
       }
-
-      // Connect to the server
-      this.mcp.connect(this.transport);
       
-      // Discover available tools
+      // Connect to the MCP server
+      await this.mcp.connect(this.transport);
+      
+      // Get available tools from the server
       const toolsResult = await this.mcp.listTools();
       this.tools = toolsResult.tools.map((tool) => {
         return {
@@ -126,49 +127,46 @@ export class MCPClient {
         };
       });
       
-      console.log(
-        "Connected to server with tools:",
-        this.tools.map(({ name }) => name)
-      );
-      
       // Mark server as connected with NORMALIZED ID
       this.connectedServers.set(normalizedId, true);
       
-      // Also store with the original extracted ID for backward compatibility
+      // Also mark with the original ID if different
       if (serverId !== normalizedId) {
         this.connectedServers.set(serverId, true);
       }
       
-      // Store the tools for this server
+      // Store tools with BOTH IDs for more reliable lookup
       this.serverTools.set(normalizedId, [...this.tools]);
-      // Also store with original ID for backward compatibility
+      
       if (serverId !== normalizedId) {
         this.serverTools.set(serverId, [...this.tools]);
       }
       
       console.log(`Successfully connected to server: ${normalizedId}`);
-      console.log(`Current connected servers: ${Array.from(this.connectedServers.entries())}`);
-    } catch (e) {
-      console.error("Failed to connect to MCP server: ", e);
+      console.log(`Server tools:`, this.tools);
+      return;
       
-      // Handle reconnection logic
-      const serverId = path.basename(serverScriptPath).replace(/\.(js|py)$/, '');
-      const attempts = this.reconnectAttempts.get(serverId) || 0;
+    } catch (error) {
+      console.error(`Error connecting to server ${serverId}:`, error);
+      
+      // Implement retry logic with exponential backoff
+      const attempts = this.reconnectAttempts.get(normalizedId) || 0;
       
       if (attempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts.set(serverId, attempts + 1);
-        const delay = this.reconnectDelay * Math.pow(2, attempts); // Exponential backoff
+        this.reconnectAttempts.set(normalizedId, attempts + 1);
         
-        console.log(`Attempting to reconnect to ${serverId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`);
+        const delay = this.reconnectDelay * Math.pow(2, attempts);
+        console.log(`Retrying connection to ${serverId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`);
         
         setTimeout(() => {
           this.connectToServer(serverScriptPath);
         }, delay);
       } else {
-        console.error(`Max reconnection attempts reached for server: ${serverId}`);
+        console.error(`Max reconnection attempts reached for ${serverId}`);
+        this.reconnectAttempts.delete(normalizedId);
       }
       
-      throw e;
+      throw error;
     }
   }
 
@@ -298,27 +296,34 @@ export class MCPClient {
   }
 
   async processQuery(query: string, temperature = 0.7, tools_enabled = true) {
-    const messages: MessageParam[] = [
-      {
-        role: "user",
-        content: query,
-      },
-    ];
-  
+    // Add the user's message to the conversation history
+    this.conversationHistory.push({
+      role: "user",
+      content: query,
+    });
+    
+    // Use the full conversation history for context
+    const messages: MessageParam[] = this.conversationHistory.filter(
+      msg => msg.role !== 'system'
+    ) as MessageParam[];
+    
     const response = await this.anthropic.messages.create({
       model: "claude-3-7-sonnet-latest",
       max_tokens: 1000,
       temperature: temperature,
       messages,
+      system: this.systemPrompt,
       tools: tools_enabled ? this.tools : undefined,
     });
   
     const finalText = [];
     const toolResults = [];
+    let assistantResponse = "";
   
     for (const content of response.content) {
       if (content.type === "text") {
         finalText.push(content.text);
+        assistantResponse += content.text;
       } else if (content.type === "tool_use") {
         const toolName = content.name;
         const toolArgs = content.input as { [x: string]: unknown } | undefined;
@@ -339,21 +344,38 @@ export class MCPClient {
               `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`
             );
             
+            // Add tool result to conversation history
+            this.conversationHistory.push({
+              role: "user",
+              content: result.content as string,
+            });
+            
+            // Update messages with the new tool result
             messages.push({
               role: "user",
               content: result.content as string,
             });
             
-            const response = await this.anthropic.messages.create({
+            const followUpResponse = await this.anthropic.messages.create({
               model: "claude-3-7-sonnet-latest",
               max_tokens: 1000,
               temperature: temperature,
               messages,
+              system: this.systemPrompt,
             });
             
-            finalText.push(
-              response.content[0].type === "text" ? response.content[0].text : ""
-            );
+            let followUpText = "";
+            if (followUpResponse.content[0]?.type === "text") {
+              followUpText = followUpResponse.content[0].text;
+              finalText.push(followUpText);
+              assistantResponse += "\n\n" + followUpText;
+            }
+            
+            // Add assistant's response to conversation history
+            this.conversationHistory.push({
+              role: "assistant",
+              content: followUpText,
+            });
           } catch (error) {
             console.error(`Error executing tool ${toolName}:`, error);
             
@@ -361,62 +383,109 @@ export class MCPClient {
               `[Error executing tool ${toolName}: ${error instanceof Error ? error.message : String(error)}]`
             );
             
-            messages.push({
+            // Add error message to conversation history
+            const errorMsg = `Error executing tool ${toolName}: ${error instanceof Error ? error.message : String(error)}`;
+            this.conversationHistory.push({
               role: "user",
-              content: `Error executing tool ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+              content: errorMsg,
             });
             
-            const response = await this.anthropic.messages.create({
+            // Update messages with the error
+            messages.push({
+              role: "user",
+              content: errorMsg,
+            });
+            
+            const errorResponse = await this.anthropic.messages.create({
               model: "claude-3-7-sonnet-latest",
               max_tokens: 1000,
               temperature: temperature,
               messages,
+              system: this.systemPrompt,
             });
             
-            finalText.push(
-              response.content[0].type === "text" ? response.content[0].text : ""
-            );
+            let errorResponseText = "";
+            if (errorResponse.content[0]?.type === "text") {
+              errorResponseText = errorResponse.content[0].text;
+              finalText.push(errorResponseText);
+              assistantResponse += "\n\n" + errorResponseText;
+            }
+            
+            // Add assistant's response to conversation history
+            this.conversationHistory.push({
+              role: "assistant",
+              content: errorResponseText,
+            });
           }
         } else {
-          finalText.push(
-            `[Tool execution of ${toolName} was not approved by the user]`
-          );
+          const notApprovedMsg = `[Tool execution of ${toolName} was not approved by the user]`;
+          finalText.push(notApprovedMsg);
           
+          // Add not approved message to conversation history
+          this.conversationHistory.push({
+            role: "user",
+            content: `The user did not approve the execution of tool ${toolName}.`,
+          });
+          
+          // Update messages with the not approved message
           messages.push({
             role: "user",
             content: `The user did not approve the execution of tool ${toolName}.`,
           });
           
-          const response = await this.anthropic.messages.create({
+          const nonApprovalResponse = await this.anthropic.messages.create({
             model: "claude-3-7-sonnet-latest",
             max_tokens: 1000,
             temperature: temperature,
             messages,
+            system: this.systemPrompt,
           });
           
-          finalText.push(
-            response.content[0].type === "text" ? response.content[0].text : ""
-          );
+          let nonApprovalText = "";
+          if (nonApprovalResponse.content[0]?.type === "text") {
+            nonApprovalText = nonApprovalResponse.content[0].text;
+            finalText.push(nonApprovalText);
+            assistantResponse += "\n\n" + nonApprovalText;
+          }
+          
+          // Add assistant's response to conversation history
+          this.conversationHistory.push({
+            role: "assistant",
+            content: nonApprovalText,
+          });
         }
       }
+    }
+    
+    // Add the combined assistant response to the conversation history if no tool calls were made
+    if (!toolResults.length) {
+      this.conversationHistory.push({
+        role: "assistant",
+        content: assistantResponse,
+      });
     }
   
     return finalText.join("\n");
   }
 
   async processQueryStructured(query: string, temperature = 0.7, tools_enabled = true) {
-    const messages: MessageParam[] = [
-      {
-        role: "user",
-        content: query,
-      },
-    ];
+    // Add the user's message to the conversation history
+    this.conversationHistory.push({
+      role: "user",
+      content: query,
+    });
+    
+    // Use the full conversation history for context
+    const messages: MessageParam[] = this.conversationHistory.filter(
+      msg => msg.role !== 'system'
+    ) as MessageParam[];
     
     const response = await this.anthropic.messages.create({
       model: "claude-3-7-sonnet-latest",
       max_tokens: 1000,
       temperature: temperature,
       messages,
+      system: this.systemPrompt,
       tools: tools_enabled ? this.tools : undefined,
     });
   
@@ -478,6 +547,12 @@ export class MCPClient {
             toolCall.status = 'success';
             toolCall.result = executionResult;
             
+            // Add tool result to conversation history
+            this.conversationHistory.push({
+              role: "user",
+              content: executionResult.content as string,
+            });
+            
             // Feed the result back to the model
             messages.push({
               role: "user",
@@ -489,11 +564,19 @@ export class MCPClient {
               max_tokens: 1000,
               temperature: temperature,
               messages,
+              system: this.systemPrompt,
             });
             
             // Append to content
             if (followUpResponse.content[0]?.type === "text") {
-              result.content += "\n\n" + followUpResponse.content[0].text;
+              const followUpText = followUpResponse.content[0].text;
+              result.content += "\n\n" + followUpText;
+              
+              // Add assistant's response to conversation history
+              this.conversationHistory.push({
+                role: "assistant",
+                content: followUpText,
+              });
             }
           } catch (error) {
             // Update tool call with error
@@ -502,10 +585,17 @@ export class MCPClient {
               error: error instanceof Error ? error.message : String(error)
             };
             
+            // Add error message to conversation history
+            const errorMsg = `Error executing tool ${toolName}: ${error instanceof Error ? error.message : String(error)}`;
+            this.conversationHistory.push({
+              role: "user",
+              content: errorMsg,
+            });
+            
             // Feed the error back to the model
             messages.push({
               role: "user",
-              content: `Error executing tool ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+              content: errorMsg,
             });
             
             const errorResponse = await this.anthropic.messages.create({
@@ -513,11 +603,19 @@ export class MCPClient {
               max_tokens: 1000,
               temperature: temperature,
               messages,
+              system: this.systemPrompt,
             });
             
             // Append to content
             if (errorResponse.content[0]?.type === "text") {
-              result.content += "\n\n" + errorResponse.content[0].text;
+              const errorResponseText = errorResponse.content[0].text;
+              result.content += "\n\n" + errorResponseText;
+              
+              // Add assistant's response to conversation history
+              this.conversationHistory.push({
+                role: "assistant",
+                content: errorResponseText,
+              });
             }
           }
         } else {
@@ -526,6 +624,12 @@ export class MCPClient {
           toolCall.result = {
             error: 'Tool execution was not approved by the user'
           };
+          
+          // Add not approved message to conversation history
+          this.conversationHistory.push({
+            role: "user",
+            content: `The user did not approve the execution of tool ${toolName}.`,
+          });
           
           // Feed the non-approval back to the model
           messages.push({
@@ -538,14 +642,30 @@ export class MCPClient {
             max_tokens: 1000,
             temperature: temperature,
             messages,
+            system: this.systemPrompt,
           });
           
           // Append to content
           if (nonApprovalResponse.content[0]?.type === "text") {
-            result.content += "\n\n" + nonApprovalResponse.content[0].text;
+            const nonApprovalText = nonApprovalResponse.content[0].text;
+            result.content += "\n\n" + nonApprovalText;
+            
+            // Add assistant's response to conversation history
+            this.conversationHistory.push({
+              role: "assistant",
+              content: nonApprovalText,
+            });
           }
         }
       }
+    }
+    
+    // Add the combined assistant response to the conversation history if no tool calls were made
+    if (!result.toolCalls.length) {
+      this.conversationHistory.push({
+        role: "assistant",
+        content: result.content,
+      });
     }
     
     return result;
@@ -577,13 +697,25 @@ export class MCPClient {
   
     try {
       console.log("\nMCP Client Started!");
-      console.log("Type your queries or 'quit' to exit.");
+      console.log("Type your queries, 'clear' to reset conversation, or 'quit' to exit.");
+      console.log("This is a multi-turn conversation - your chat history is preserved between turns.");
   
       while (true) {
         const message = await rl.question("\nQuery: ");
+        
+        // Handle special commands
         if (message.toLowerCase() === "quit") {
           break;
+        } else if (message.toLowerCase() === "clear") {
+          this.resetConversation();
+          console.log("Conversation history cleared. Starting fresh conversation.");
+          continue;
         }
+        
+        // Show conversation turn number
+        const turnNumber = Math.floor(this.conversationHistory.length / 2) + 1;
+        console.log(`\n--- Turn ${turnNumber} ---`);
+        
         const response = await this.processQuery(message);
         console.log("\n" + response);
       }
@@ -717,18 +849,58 @@ export class MCPClient {
     
     return connectedServers;
   }
+
+  private extractServerId(serverScriptPath: string): string {
+    if (serverScriptPath.startsWith('@')) {
+      // For npm scoped packages, extract a sensible ID
+      // Example: @agentdeskai/browser-tools-mcp@1.2.0 -> browser-tools-mcp
+      const packageParts = serverScriptPath.split('/');
+      if (packageParts.length > 1) {
+        let packageName = packageParts[1];
+        
+        // Remove version if present
+        packageName = packageName.split('@')[0];
+        
+        // Remove common prefixes
+        packageName = packageName.replace(/^(mcp-)?server-/, '');
+        
+        return packageName;
+      }
+      return serverScriptPath.replace('@', '').split('/')[0];
+    } else if (serverScriptPath.includes('@') && !serverScriptPath.includes('/') && !serverScriptPath.includes('\\')) {
+      // For non-scoped packages with version: package-name@1.2.0 -> package-name
+      return serverScriptPath.split('@')[0];
+    } else if (serverScriptPath.endsWith('.js') || serverScriptPath.endsWith('.py')) {
+      // For script files, use the filename without extension
+      return path.basename(serverScriptPath).replace(/\.(js|py)$/, '');
+    } else {
+      // For other cases, use the raw input
+      return serverScriptPath;
+    }
+  }
+
+  // Add method to reset conversation history
+  resetConversation(): void {
+    this.conversationHistory = [];
+    console.log('Conversation history has been reset');
+  }
+  
+  // Get the current conversation history
+  getConversationHistory(): ExtendedMessageParam[] {
+    return [...this.conversationHistory];
+  }
 }
 
 async function main() {
   if (process.argv.length < 3) {
     console.log("Usage: node index.ts <path_to_server_script>");
-      return;
-    }
-    const mcpClient = new MCPClient();
-    try {
-      await mcpClient.connectToServer(process.argv[2]);
-      await mcpClient.chatLoop();
-    } finally {
+    return;
+  }
+  const mcpClient = new MCPClient();
+  try {
+    await mcpClient.connectToServer(process.argv[2]);
+    await mcpClient.chatLoop();
+  } finally {
     await mcpClient.cleanup();
     process.exit(0);
   }
@@ -741,4 +913,13 @@ const currentModulePath = fileURLToPath(import.meta.url);
 if (process.argv[1] === currentModulePath) {
   main();
 }
+
+// Export our new connection manager and agent flow functionality
+export { MCPConnectionManager } from './connectionManager.js';
+export {
+  performComplexTask,
+  prepareToolsForLLM,
+  processLLMResponse,
+  createAnthropicLLMClient
+} from './agentFlow.js';
    

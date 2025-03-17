@@ -33,50 +33,118 @@ try {
   console.error('Failed to load MCP config:', error);
 }
 
-// API Routes
-app.get('/api/servers', (req: express.Request, res: express.Response) => {
-  // Get the list of all connected servers
-  const connectedServerIds = mcpClient.getAllConnectedServers();
-  console.log('Currently connected servers:', connectedServerIds);
-  
-  // Get all available tools
-  const allTools = mcpClient.getTools();
-  console.log('Available tools:', allTools.map(t => t.name));
-  
-  // Generate server list from mcpConfig
-  const serverList = Object.entries(mcpConfig.mcpServers).map(([id, config]) => {
-    // Check if server is explicitly disabled
-    const isEnabled = config.enabled !== false;
+// Helper function to save the config file
+const saveConfig = () => {
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+    console.log('MCP config saved successfully');
+    return true;
+  } catch (error) {
+    console.error('Failed to save MCP config:', error);
+    return false;
+  }
+};
+
+// Helper function to add a new server to config
+const addServerToConfig = (serverId: string, serverConfig: any): boolean => {
+  try {
+    // Add the server to the config
+    mcpConfig.mcpServers[serverId] = serverConfig;
     
-    // Generate a more descriptive name by capitalizing and adding spaces
-    const formattedName = id
-      .split('-')
-      .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
-    
-    // Generate description based on configuration
-    let description = '';
-    
-    // Try to derive description from package name or server config
-    if (config.args && config.args.length > 0) {
-      // Look for an NPM package name in the args
-      const packageArg = config.args.find((arg: any) => 
-        typeof arg === 'string' && (arg.startsWith('@') || !arg.startsWith('-'))
-      );
+    // Save the updated config
+    return saveConfig();
+  } catch (error) {
+    console.error('Failed to add server to config:', error);
+    return false;
+  }
+};
+
+// Helper function to extract server ID from path or package name
+const extractServerId = (serverPath: string): string => {
+  if (serverPath.startsWith('@')) {
+    // For npm packages, extract a sensible ID
+    // Example: @agentdeskai/browser-tools-mcp@1.2.0 -> browser-tools
+    const packageParts = serverPath.split('/');
+    if (packageParts.length > 1) {
+      let packageName = packageParts[1];
       
-      if (packageArg) {
-        // Extract descriptive text from package name
-        const packageName = packageArg.split('/').pop() || '';
-        if (packageName.startsWith('mcp-server-') || packageName.startsWith('server-')) {
-          // Format from mcp-server-xxx or server-xxx to "xxx service"
-          const serviceName = packageName
-            .replace(/^(mcp-)?server-/, '')
-            .split('-')
-            .map((part: string) => part.charAt(0).toUpperCase() + part.slice(1))
-            .join(' ');
-          description = `${serviceName} service`;
-        } else {
-          description = `${packageName} service`;
+      // Remove version if present
+      packageName = packageName.split('@')[0];
+      
+      // Remove common prefixes
+      packageName = packageName.replace(/^(mcp-)?server-/, '');
+      
+      // If the package has "mcp" in the name, extract that part
+      if (packageName.includes('mcp')) {
+        return packageName.split('-mcp')[0];
+      }
+      
+      return packageName;
+    }
+    return serverPath.replace('@', '').split('/')[0];
+  } else if (serverPath.endsWith('.js') || serverPath.endsWith('.py')) {
+    // For script files, use the filename without extension
+    return path.basename(serverPath).replace(/\.(js|py)$/, '');
+  } else {
+    // For other cases, use the raw input
+    return serverPath;
+  }
+};
+
+// Helper function to generate config for npm package
+const generateNpmPackageConfig = (packageName: string): any => {
+  return {
+    enabled: true,
+    command: "npx",
+    args: [
+      "-y",
+      packageName
+    ]
+  };
+};
+
+// GET /api/servers - Get all available servers
+app.get('/api/servers', async (req, res) => {
+  try {
+    // Get all connected servers from the MCP client
+    const connectedServerIds = mcpClient.getAllConnectedServers();
+    console.log('Currently connected servers:', connectedServerIds);
+    
+    // Get all available tools
+    const availableTools = mcpClient.getTools().map(tool => tool.name);
+    console.log('Available tools:', availableTools);
+    
+    // Build the response with all servers from config
+    const servers = Object.entries(mcpConfig.mcpServers).map(([id, config]) => {
+      // Format the server name for display
+      const formattedName = id
+        .split('-')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+      
+      // Generate a description based on the server type
+      let description = '';
+      
+      if (config.args && config.args.length > 0) {
+        // Try to derive description from package name or server config
+        const packageArg = config.args.find((arg: any) => 
+          typeof arg === 'string' && (arg.startsWith('@') || !arg.startsWith('-'))
+        );
+        
+        if (packageArg) {
+          // Extract descriptive text from package name
+          const packageName = typeof packageArg === 'string' ? packageArg.split('/').pop() || '' : '';
+          if (packageName.startsWith('mcp-server-') || packageName.startsWith('server-')) {
+            // Format from mcp-server-xxx or server-xxx to "xxx service"
+            const serviceName = packageName
+              .replace(/^(mcp-)?server-/, '')
+              .split('-')
+              .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+              .join(' ');
+            description = `${serviceName} service`;
+          } else {
+            description = `${packageName} service`;
+          }
         }
       } else if (config.command === 'node' && typeof config.args[0] === 'string') {
         // For Node.js scripts, use the script path
@@ -84,59 +152,64 @@ app.get('/api/servers', (req: express.Request, res: express.Response) => {
         const scriptName = path.basename(scriptPath, path.extname(scriptPath));
         description = `${scriptName.charAt(0).toUpperCase() + scriptName.slice(1)} service`;
       }
-    }
-    
-    // If we couldn't derive a meaningful description, use a generic one
-    if (!description) {
-      description = `${formattedName} service`;
-    }
-    
-    // IMPROVED SERVER CONNECTION CHECK
-    // First, normalize both the config ID and all connected server IDs to handle prefixes consistently
-    const normalizedConfigId = id.toLowerCase().replace(/^(mcp-)?server-/, '');
-    
-    // Check direct connection first
-    const directlyConnected = mcpClient.isConnected(id);
-    
-    // Then check using normalized IDs
-    const isInConnectedList = connectedServerIds.some(connectedId => {
-      // Normalize the connected ID to match our normalization format
-      const normalizedConnectedId = connectedId.toLowerCase().replace(/^(mcp-)?server-/, '');
-      return normalizedConnectedId === normalizedConfigId || 
-             connectedId.toLowerCase() === id.toLowerCase();
+      
+      // If we couldn't derive a meaningful description, use a generic one
+      if (!description) {
+        description = `${formattedName} service`;
+      }
+      
+      // IMPROVED SERVER CONNECTION CHECK
+      // First, normalize both the config ID and all connected server IDs to handle prefixes consistently
+      const normalizedConfigId = id.toLowerCase().replace(/^(mcp-)?server-/, '');
+      
+      // Check direct connection first
+      const directlyConnected = mcpClient.isConnected(id);
+      
+      // Then check using normalized IDs
+      const isInConnectedList = connectedServerIds.some(connectedId => {
+        // Normalize the connected ID to match our normalization format
+        const normalizedConnectedId = connectedId.toLowerCase().replace(/^(mcp-)?server-/, '');
+        return normalizedConnectedId === normalizedConfigId || 
+               connectedId.toLowerCase() === id.toLowerCase();
+      });
+      
+      const isConnected = directlyConnected || isInConnectedList;
+      
+      console.log(`Server ${id}: normalizedId=${normalizedConfigId}, directlyConnected=${directlyConnected}, isInConnectedList=${isInConnectedList}, final isConnected=${isConnected}`);
+      console.log(`Connected IDs comparison:`, connectedServerIds.map(id => ({ 
+        original: id, 
+        normalized: id.toLowerCase().replace(/^(mcp-)?server-/, '') 
+      })));
+      
+      // Get tools specific to this server
+      const serverSpecificTools = isConnected ? mcpClient.getToolsForServer(id).map(tool => ({
+        name: tool.name,
+        description: tool.description || `Tool provided by ${formattedName}`,
+        inputSchema: tool.input_schema
+      })) : [];
+      
+      return {
+        id,
+        name: formattedName,
+        description,
+        enabled: config.enabled !== false, // Default to true if not specified
+        connected: isConnected && config.enabled !== false,
+        tools: serverSpecificTools
+      };
     });
     
-    const isConnected = directlyConnected || isInConnectedList;
-    
-    console.log(`Server ${id}: normalizedId=${normalizedConfigId}, directlyConnected=${directlyConnected}, isInConnectedList=${isInConnectedList}, final isConnected=${isConnected}`);
-    console.log(`Connected IDs comparison:`, connectedServerIds.map(id => ({ 
-      original: id, 
-      normalized: id.toLowerCase().replace(/^(mcp-)?server-/, '') 
-    })));
-    
-    // Get tools specific to this server
-    const serverSpecificTools = isConnected ? mcpClient.getToolsForServer(id).map(tool => ({
-      name: tool.name,
-      description: tool.description || `Tool provided by ${formattedName}`,
-      inputSchema: tool.input_schema
-    })) : [];
-    
-    return {
-      id,
-      name: formattedName,
-      description,
-      enabled: isEnabled,
-      connected: isConnected && isEnabled,
-      tools: serverSpecificTools
-    };
-  }).filter(server => server.enabled);
-
-  res.json(serverList);
+    res.json(servers);
+  } catch (error) {
+    console.error('Error getting servers:', error);
+    res.status(500).json({ error: 'Failed to get servers' });
+  }
 });
 
 app.post('/api/servers/connect', async (req: express.Request, res: express.Response) => {
   try {
     const { serverId, serverPath } = req.body;
+    
+    console.log('Connect request received:', { serverId, serverPath });
     
     if (!serverId && !serverPath) {
       return res.status(400).json({ error: 'Either Server ID or Server Path is required' });
@@ -144,6 +217,16 @@ app.post('/api/servers/connect', async (req: express.Request, res: express.Respo
     
     let actualServerId = serverId;
     let actualServerPath = serverPath;
+    let isNewServer = false;
+    
+    // If it's browser-tools-mcp, apply special handling
+    const isBrowserTools = 
+      (serverPath && serverPath.includes('browser-tools-mcp')) ||
+      (serverId && serverId.toLowerCase().includes('browser-tools'));
+      
+    if (isBrowserTools) {
+      console.log('Detected browser-tools-mcp connection request');
+    }
     
     // If serverId is provided but no serverPath, look up in the config
     if (serverId && !serverPath) {
@@ -246,9 +329,53 @@ app.post('/api/servers/connect', async (req: express.Request, res: express.Respo
           process.env[key] = value as string;
         });
       }
-    } else if (serverPath && !serverId) {
-      // Extract serverId from serverPath if only serverPath is provided
-      actualServerId = path.basename(serverPath).replace(/\.(js|py)$/, '');
+    } else if (serverPath) {
+      // This is a new server specification, extract id from path
+      if (!actualServerId) {
+        actualServerId = extractServerId(serverPath);
+      }
+      
+      // Handle new NPM package
+      const isNpmPackage = serverPath.startsWith('@') || !serverPath.includes('/') && !serverPath.includes('\\');
+      const isJs = serverPath.endsWith('.js');
+      const isPy = serverPath.endsWith('.py');
+      
+      // Check if this is a new server not in the config
+      isNewServer = !mcpConfig.mcpServers[actualServerId];
+      
+      // Add to config if it's new
+      if (isNewServer) {
+        let serverConfig: any;
+        
+        if (isNpmPackage) {
+          // Generate config for npm package
+          serverConfig = generateNpmPackageConfig(serverPath);
+        } else if (isJs) {
+          // Generate config for JS file
+          serverConfig = {
+            enabled: true,
+            command: "node",
+            args: [
+              serverPath
+            ]
+          };
+        } else if (isPy) {
+          // Generate config for Python file
+          const pythonCommand = process.platform === "win32" ? "python" : "python3";
+          serverConfig = {
+            enabled: true,
+            command: pythonCommand,
+            args: [
+              serverPath
+            ]
+          };
+        } else {
+          return res.status(400).json({ error: "Server script must be a .js or .py file, or an npm package name" });
+        }
+        
+        // Add to config
+        addServerToConfig(actualServerId, serverConfig);
+      }
     }
     
     // Format server name
@@ -326,7 +453,8 @@ app.post('/api/servers/connect', async (req: express.Request, res: express.Respo
         name: formattedName,
         description,
         connected: true,
-        tools: mcpClient.getTools()
+        tools: mcpClient.getTools(),
+        isNewServer // Send flag if this was a new server added to config
       }
     });
   } catch (error) {
@@ -409,6 +537,45 @@ app.post('/api/chat', async (req: express.Request, res: express.Response) => {
     });
   } catch (error) {
     console.error('Error in chat endpoint:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+      timestamp: new Date()
+    });
+  }
+});
+
+// Add endpoint to get conversation history
+app.get('/api/conversation/history', (req: express.Request, res: express.Response) => {
+  try {
+    // Retrieve the conversation history from the MCPClient
+    const history = mcpClient.getConversationHistory();
+    
+    // Return the conversation history
+    res.json({
+      success: true,
+      history
+    });
+  } catch (error) {
+    console.error('Error retrieving conversation history:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+      timestamp: new Date()
+    });
+  }
+});
+
+// Add endpoint to reset conversation history
+app.post('/api/conversation/reset', (req: express.Request, res: express.Response) => {
+  try {
+    // Reset the conversation history
+    mcpClient.resetConversation();
+    
+    res.json({
+      success: true,
+      message: 'Conversation history has been reset'
+    });
+  } catch (error) {
+    console.error('Error resetting conversation history:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Unknown error occurred',
       timestamp: new Date()

@@ -197,7 +197,19 @@ const ChatLayout: React.FC = () => {
       }
     };
     
+    // Initial fetch
     fetchServers();
+    
+    // Register for server updates
+    const unregister = mcpService.registerServerUpdateCallback(() => {
+      console.log('Server update detected in ChatLayout, refreshing data');
+      fetchServers();
+    });
+    
+    // Clean up the subscription when component unmounts
+    return () => {
+      unregister();
+    };
   }, []);
 
   // Scroll to bottom when messages change

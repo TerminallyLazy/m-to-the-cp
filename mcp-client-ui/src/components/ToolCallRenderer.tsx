@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { Button, Stack, Dialog, DialogTitle, DialogContent, DialogActions, Typography, Box } from '@mui/material';
+import { Button, Stack, Dialog, DialogTitle, DialogContent, DialogActions, Typography, Box, ListItemText } from '@mui/material';
 import classNames from 'classnames';
 
 // Use our utility instead of direct Prism imports
@@ -313,7 +313,7 @@ export const ToolApprovalDialog: React.FC<{
           <code>{formatJson(args || {})}</code>
         </Box>
         
-        <Typography sx={{ mt: 2 }}>
+        <Typography variant="body1" component="div" sx={{ mt: 2 }}>
           Do you want to allow this tool execution?
         </Typography>
       </DialogContent>
